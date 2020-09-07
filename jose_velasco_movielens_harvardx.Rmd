@@ -1,0 +1,506 @@
+---
+title: "MovieLens Project"
+author: "Jose Velasco"
+date: "03/Sep/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Movie Recommendation System
+
+This report is elaborated for the Capstone project of the HarvardX: PH125.9X Data Science course.
+
+The motivation of this excercise is to generate a machine learning algorithm that recommends movies based on movie rating predictions.
+First of all, a general idea to recommendation systems is presented.
+Then, the data will be explored and summarised in order to get familiarised with it. In the third place, a machine learning algorithm is gradually developed to predict movie ratings. Finally, results and conclusions will be presented.
+
+
+## 1 Introduction:
+
+Recommendation systems use ratings that users have given to make specific recommendations. Specifically, a movie recommendation system predicts how many stars a user will give to a movie. One star suggests that the user did not like the movie and five stars imply that the user loved the movie.
+
+A dataset was provided by Edx. It includes more than 10 millions of movie ratings for around 70,000 movies and 10,700 users. The data wrangling process was also provided by Edx. The starting dataset includes movie rating, user id, movie id and title. In this analysis the year is extracted from the title to further expand the model and achieve a better result. 
+
+In this report, a movie recommendation system is constructed gradually, starting from a baseline model which predicts any movie rating by simply taking the average rating of all movies. The second model includes a movie effect and the third model a user effect. The third model incorporates a year effect. The final model is a regularized model which takes into account the previous models plus a penalization. The model will be evaluated using RMSE (Root Mean Square Error).
+
+
+## 2 Methods and Analysis:
+
+### 2.1 Data Exploration:
+
+In this section, data is presented in order to become acquainted with it.
+The following piece of code was provided by Edx to create two separate datasets: the training set and the testing set:
+
+```{r loading data, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("stringr", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+#the stringr library is added to expand the model
+library(stringr)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier
+#movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+#                                            title = as.character(title),
+#                                            genres = as.character(genres))
+# if using R 4.0 or later
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                            title = as.character(title),
+                                            genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+First, the required packages are downloaded from the provided link and loaded into R. The stringr package is also included in this analysis to further expand the model as will be shown later.
+
+Second, the dataset is downloaded and a data wrangling process is performed in order to get a tidy dataset from which we can derive the model.
+
+The dataset is split in a training set (Edx), which comprises 90% of the data, and a testing set (validation), with the remaining 10% of the data.
+
+Furthermore, a year of release column is created for each movie.
+
+```{r year column, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+edx <- edx %>% 
+  mutate(year = as.numeric(str_sub(title,start= -5,end= -2)))
+validation <- validation %>%
+  mutate(year = as.numeric(str_sub(title,start= -5,end= -2)))
+```
+
+It is also validated that the year column does not have any missing values.
+
+```{r validate year column, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+summary(edx$year)
+summary(validation$year)
+```
+
+A quick data summary shows a matrix of the following characteristics. Each column represents a variable and each row represents a different rating given by one user to one particular movie.
+
+```{r dimension and variables, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+dim(as.matrix(edx))
+names(edx)
+```
+
+Furthermore, we can see that there are around 70,000 different users and 10,700 different movies.
+
+```{r summarise users and movies, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+edx %>% 
+  summarize(n_users = n_distinct(userId),
+            n_movies = n_distinct(movieId))
+```
+
+We examine now that not all movies are rated equally and not all users are frequent raters. There are movies that are generally acclaimed by the public and some movies that are not so popular. On the other hand, there are users who are very strict (like movie critics) and some users that love every movie they watch.
+
+```{r movie-id-and-user-hists, echo=FALSE, fig.width=6, fig.height=3}
+p1 <- edx %>% 
+  count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(fill = "#FC4E08",color = "grey", binwidth = 0.25) + 
+  scale_x_log10() + 
+  geom_density(aes(y=..count..*0.25), alpha = 0.5, color="blue", 
+               linetype ="dashed", size =0.5) +
+  labs(x = "Movies", y = "Number of Ratings") + 
+  ggtitle("Movie Ratings by Movie") 
+p2 <- edx %>% 
+  count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(fill = "#FC4E08",color = "grey", binwidth = 0.25) + 
+  scale_x_log10() + 
+  geom_density(aes(y=..count..*0.25), alpha = 0.5, color="blue", 
+               linetype ="dashed", size =0.5) +
+  labs(x = "Users", y = "Number of Ratings") + 
+  ggtitle("Movie Ratings by User") 
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+```
+
+Additionally, movies released after 1990 tend to have more ratings than movies released before that date. This could be explained by the assumption that most people tend to view recent movies and only a handful watch old movies (sometimes considered classic or art movies).
+
+It is also noted that recently released movies tend to have fewer ratings than movies around 1990-2000. This could be explained by the fact that in order to get more ratings more time is needed.
+
+```{r years, echo=FALSE, fig.width=6, fig.height=3}
+edx %>% count(year) %>% 
+  ggplot(aes(y =n/1000, x = year)) + 
+  geom_line(color = "#FC4E08") + 
+  labs(x = "Year", y = "Ratings (thousands)") + 
+  ggtitle("Year of release and number of ratings")
+```
+
+After exploring the data, it is reasonable to think that a model can be derived using movie ratings as an endogenous variable, while users and year of release can be used as explanatory variables.
+
+As can be noted, not all users rate every movie, the most active users rate slightly more than 15,000 movies, whereas the dataset has almost 70,000 movies. The dataset has many blank spaces and the machine learning algorithm can be thought of as if the blank spaces were going to be filled by it, thus predicting ratings for each movie and user in order to recommend movies for users.
+
+
+### 2.2 Model Evaluation:
+
+The model performance is going to be evaluated through the RMSE (residual mean square error). The function is defined as follows:
+
+$$
+\mbox{RMSE} = \sqrt{\frac{1}{N} \sum_{u,i}^{} \left( \hat{y}_{u,i} - y_{u,i} \right)^2 }
+$$
+
+Let $y_{u,i}$ be defined as the rating for movie $i$ by user $u$ and denote our prediction with $\hat{y}_{u,i}$, with $N$ being the number of user/movie combinations and the sum occurring over all these combinations.
+
+The RMSE is similar to a standard deviation: it is the typical error that is made when predicting a movie rating. If this number is larger than one, it means the typical error is larger than one star, which is not good.
+
+The following function computes the RMSE for vectors of ratings and their corresponding predictors:
+
+```{r define RMSE function, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+RMSE <- function(true_ratings, predicted_ratings){
+    sqrt(mean((true_ratings - predicted_ratings)^2))
+  }
+```
+
+
+### 2.3 Deriving the Model
+
+ONce it has been established that movie ratings can be predicted using the variables available in the data set, the model can be defined. As a reference, a similar approach is used as the one in this paper: [http://blog.echen.me/2011/10/24/winning-the-netflix-prize-a-summary/](http://blog.echen.me/2011/10/24/winning-the-netflix-prize-a-summary/). 
+
+It is noted that the prediction can be decomposed in three factors:
+
+a) baseline rating (the mean of all rows)
+b) user effect
+c) movie effect
+
+This factorization is useful since there are better movies that tend to be rated better and there are different users that could tend to rate lower or higher on average. 
+
+Furthermore, a fourth factor is added:
+
+d) year of release effect
+
+The rationale behind this decision is that different trends characterizes different decades for movies. We can find artsy films mostly in the first decades, action films during the 80s and 90s and a lot of special movie effect, after 2000.
+
+
+#### 2.3.1 Baseline Model
+
+This model is going to be useful as it will be the starting point from which we will reduce our RMSE. This model takes the naïve approach of predicting every movie with the mean of all ratings across all users. Everything else is explained by randomness, so the model looks like this:
+
+$$
+Y_{u,i} = \mu + \varepsilon_{u,i}
+$$
+
+The estimate that minimizes the RMSE is the least squares estimate of $\mu$ and, in this case, is the average of all ratings:
+
+```{r}
+mu <- mean(edx$rating)
+mu
+```
+
+This model predicts all unknown ratings with $\hat{\mu}$ and obtains the following RMSE: 
+
+```{r naive RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+naive_rmse <- RMSE(validation$rating, mu)
+naive_rmse
+```
+
+This result can be interpreted as the typical error it is made when the model fills a blank space with no rating.
+
+The results are stored in the following table:
+
+```{r store naive RMSE results, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+rmse_results <- tibble(method = "Baseline model", RMSE = naive_rmse)
+```
+
+
+#### 2.3.2 Modeling Movie Effects
+
+Some movies are rated higher than others, as noted before. The previous model can be augmented by adding the term $b_i$ to represent average ranking for movie $i$: 
+
+$$
+Y_{u,i} = \mu + b_i + \varepsilon_{u,i}
+$$
+
+In this particular situation, the least squares estimate $\hat{b}_i$ is just the average of $Y_{u,i} - \hat{\mu}$ for each movie $i$. So it is possible to compute that term instead of computing the least squares model:
+
+```{r define movie averages, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+movie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+```
+
+These estimates are centered around the mean:
+
+```{r plot movie effects, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+qplot(b_i, data = movie_avgs, bins = 10, color = I("black"))
+```
+
+Now, the new predictions are calculated using the expanded model $\hat{y}_{u,i} = \hat{\mu} + \hat{b}_i$ and the RMSE is also computed:
+
+```{r predict movie effect RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+predicted_ratings <- mu + validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+RMSE(predicted_ratings, validation$rating)
+```
+
+Then, the results are stored:
+
+```{r store movie effect RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+model_1_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie Effect Model",  
+                                 RMSE = model_1_rmse))
+```
+
+The RMSE drops by 12% to 0.9439, a significant improvement from the naïve approach.
+
+
+#### 2.3.3 User Effects Model
+
+The model can still be improved by adding a user effect:
+
+$$ 
+Y_{u,i} = \mu + b_i + b_u + \varepsilon_{u,i}
+$$
+
+Where $b_u$ is a user-specific effect. 
+
+An approximation is computed for $\hat{\mu}$ and $\hat{b}_i$ and estimating $\hat{b}_u$ as the average of $y_{u,i} - \hat{\mu} - \hat{b}_i$:
+
+```{r compute user average, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+```
+
+Then the predictors are constructed and the RMSE again diminishes:
+
+```{r predict user effect, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+predicted_ratings <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+RMSE(predicted_ratings, validation$rating)
+```
+
+```{r store user effect, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+model_2_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + User Effects Model",  
+                                 RMSE = model_2_rmse))
+```
+
+
+#### 2.3.4 Year Effects Model
+
+For the third model, we add the folowing term: $b_y$ which represents the year effect:
+
+$$ 
+Y_{u,i,y} = \mu + b_i + b_u + b_y \varepsilon_{u,i}
+$$
+
+An approximation is computed for $\hat{\mu}$ and $\hat{b}_i$ and $\hat{b}_u$. Let $\hat{b}_y$ be estimated as the average of $y_{u,i,y} - \hat{\mu} - \hat{b}_i - \hat{b}_u$:
+
+```{r compute year average, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+year_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  group_by(year) %>%
+  summarize(b_y = mean(rating - mu - b_i - b_u))
+```
+
+The predicted ratings are computed and a new RMSE estimated:
+
+```{r predict year effect, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+predicted_ratings <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  left_join(year_avgs, by='year') %>%
+  mutate(pred = mu + b_i + b_u + b_y) %>%
+  pull(pred)
+RMSE(predicted_ratings, validation$rating)
+```
+
+The results are stored:
+
+```{r store year RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+model_3_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + User + Year Effects Model",  
+                                 RMSE = model_3_rmse))
+```
+
+
+#### 2.3.5 Regularized Model
+
+In order to improve the results, a regularization method based on penalized least squares is applied. Instead of minimizing the least squares equation, an equation that adds a penalty term $\lambda$ (lambda) is minimized:
+
+$$\frac{1}{N} \sum_{u,i} \left(y_{u,i} - \mu - b_i\right)^2 + \lambda \sum_{i} b_i^2$$
+
+The first term is just least squares and the second is a penalty that gets larger when many $b_i$ are large. The values of $b_i$ that minimize this equation are:
+
+$$
+\hat{b}_i(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu}\right)
+$$
+
+Where $n_i$ is the number of ratings made for movie $i$. This approach will have the desired effect: when the sample size $n_i$ is very large, a case which will result in a stable estimate, then the penalty $\lambda$ is effectively ignored since $n_i+\lambda \approx n_i$. However, when the $n_i$ is small, then the estimate $\hat{b}_i(\lambda)$ is shrunken towards 0. 
+
+For the generalized model with three explanatory variables we consider the following equation:
+
+$$
+\sum_{u,i,y} \left(y_{u,i,y} - \mu - b_i - b_u - b_y \right)^2 + 
+\lambda \left(\sum_{i} b_i^2 + \sum_{u} b_u^2\ + \sum_{y} b_y^2\right)
+$$
+
+#### 2.3.5.1 Cross Validation 
+
+In order to find the optimal $\lambda$, a process of cross-validation is needed. First, the Edx dataset is split in training and testing sets:
+
+```{r create edx data partition into train and test, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+
+set.seed(1998)
+test_index <- createDataPartition(y = edx$rating, times = 1,
+                                  p = 0.2, list = FALSE)
+train_set <- edx[-test_index,]
+temp <- edx[test_index,]
+
+test_set <- temp %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, test_set)
+edx <- rbind(train_set, removed)
+
+rm(test_index, temp, removed)
+
+```
+
+Then, different values of $\lambda$ are tested across the training set in order to find the value of $\lambda$ that minimizes RMSE.
+
+```{r data regularisation, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+   
+  mu_train <- mean(train_set$rating)
+  
+  b_i <- train_set %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu_train)/(n()+l))
+  
+  b_u <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu_train)/(n()+l))
+  
+  b_y <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    group_by(year) %>%
+    summarize(b_y = sum(rating - b_i - b_u - mu_train)/(n()+l))
+  
+  
+  predicted_ratings <- 
+    test_set %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_y, by = "year") %>%
+    mutate(pred = mu_train + b_i + b_u + b_y) %>%
+    pull(pred)
+  
+  return(RMSE(as.matrix(test_set$rating), as.matrix(predicted_ratings)))
+})
+```
+
+Now, it is noted that the best value of lambda is between 4 and 5:
+
+```{r plot lambdas and RMSE of regularised model, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+lambda <- lambdas[which.min(rmses)]
+lambda
+
+qplot(lambdas, rmses)
+```
+
+Now, the results are stored:
+
+```{r store regularised RMSE, echo=TRUE, message = FALSE, warning = FALSE, eval = TRUE}
+model_4_rmse <- min(rmses)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Regularized Movie + User + Year Effects Model",  
+                                 RMSE = model_4_rmse))
+rmse_results 
+
+```
+
+
+## 3 Results
+
+As confirmed by the final model, there is evidence that movie ratings, users and the year of release help to improve prediction over a a simple recommendation system analysis based solely on the average of all movies. 
+
+```{r table with RMSE, echo=FALSE, message = FALSE, warning = FALSE, eval = TRUE}
+rmse_results 
+if(knitr::is_html_output()){
+  knitr::kable(rmse_results, "html") %>%
+    kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
+} else{
+  knitr::kable(rmse_results, "latex", booktabs = TRUE) %>%
+    kableExtra::kable_styling(font_size = 8)
+}
+```
+
+Furthermore, the RMSE was improved from an initial 1.22 to 0.8647.
+
+
+## 4 Conclusion
+
+The model developed in this report was successful in explaining how a rating from a certain movie from a single user could be interpreted. 
+
+This rating was decomposed in the following manner:
+
+a general mean rating + a movie effect + a user effect + a year effect + randomness
+
+There is still room for improvement. For instance, this model could be further improved by using genres effect, which would be based on a user preference for some genres. Another path could be to use the timestamp to improve the model. This could be explained by the hypothesis that if some users are fans of certain actors or franchises, they would tend to watch and rate the movie as soon as it is released and they would give higher ratings to these movies.
+
+
+
+
+
